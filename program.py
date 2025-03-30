@@ -19,13 +19,10 @@ class TritonAttention(torch.autograd.Function):
         stage = 3 if causal else 1
 
         grid = lambda args: (
-            triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"])
+            triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]),
             BATCH_SIZE * NUM_HEADS,
             1,
         )
-
-
-
 
 
 def test_op(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal, dtype=torch.float16):

@@ -35,4 +35,4 @@ The fact that K is transposed just affects how the matmul is performed inside ea
 
 A: Each attention head is an independent computation, and we typically apply multi-head attention across a batch of sequences. So if you have 4 sequences in a batch and 8 attention heads, you end up with 4 × 8 = 32 completely independent attention calculations. Each of these needs its own Q, K, and V matrices.
 
-Therefore, we launch one kernel per **(batch, head)** pair. That’s why the grid’s Y-dimension is `BATCH_SIZE * NUM_HEADS`. This allows each kernel to process the attention for one head of one sequence in the batch, effectively covering the entire batch in one go.
+Therefore, we launch one kernel per **(head, batch)** pair. That’s why the grid’s Y-dimension is `BATCH_SIZE * NUM_HEADS`. This allows each kernel to process the attention for one head of one sequence in the batch, effectively covering the entire batch in one go.

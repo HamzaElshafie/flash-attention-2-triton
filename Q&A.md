@@ -36,3 +36,28 @@ The fact that K is transposed just affects how the matmul is performed inside ea
 A: Each attention head is an independent computation, and we typically apply multi-head attention across a batch of sequences. So if you have 4 sequences in a batch and 8 attention heads, you end up with 4 × 8 = 32 completely independent attention calculations. Each of these needs its own Q, K, and V matrices.
 
 Therefore, we launch one kernel per **(head, batch)** pair. That’s why the grid’s Y-dimension is `BATCH_SIZE * NUM_HEADS`. This allows each kernel to process the attention for one head of one sequence in the batch, effectively covering the entire batch in one go.
+
+--------------
+
+```python
+stride_Q_batch = Q.stride(0)
+stride_Q_head = Q.stride(1)
+stride_Q_seq = Q.stride(2)
+stride_Q_dim = Q.stride(3)
+```
+
+(similar stride extraction is done for `K` and `V`)
+
+**Q: What does `stride_Q_batch = Q.stride(0)` mean? How can it tell Triton how to move from one batch to another?**
+
+A: Great question — this line can definitely seem confusing at first. It might look like stride(0) is telling Triton to jump "zero" indices to move to the next batch, but that's not how strides work. In PyTorch, calling `.stride(i)` gives you the number of elements to skip in memory to move by one step along dimension i. So if your tensor Q has shape `(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)`, then `Q.stride(0)` returns how far you need to jump in memory to go from one batch to the next.
+
+For example, suppose Q.shape = (2, 4, 8, 128). Then calling Q.stride() might return (4096, 1024, 128, 1). This means:
+
+To move from one batch to the next, skip 4096 elements
+To move between heads, skip 1024
+To move along the sequence, skip 128
+To move across dimensions within a token, skip 1
+So in the line stride_Q_batch = Q.stride(0), we're extracting the stride needed to hop between batches in memory.
+
+This is necessary because Triton operates on raw memory pointers and does not assume any tensor layout. The stride gives it the information it needs to navigate the tensor manually and correctly. So stride(0) is not saying "jump zero" — it's telling you the size of the batch chunk in memory.

@@ -18,11 +18,43 @@ class TritonAttention(torch.autograd.Function):
 
         stage = 3 if causal else 1
 
+        # Number of parallel programs = BATCH_SIZE * NUM_HEADS * NUM_BLOCKS_Q
         grid = lambda args: (
             triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]),
             BATCH_SIZE * NUM_HEADS,
             1,
         )
+
+        # M is the logsumexp for the backward pass, one for each query
+        M = torch.empty(
+            (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM), device=Q.device, dtype=torch.float32,
+        )
+
+        __attn__fwd[grid](
+            Q = Q,
+            K = K,
+            V = V,
+            softmax_scale = softmax_scale,
+            M = M,
+            stride_Q_batch = Q.stride(0),
+            stride_Q_head = Q.stride(1),
+            stride_Q_seq = Q.stride(2),
+            stride_Q_dim = Q.stide(3),
+            stride_K_batch = K.stride(0),
+            stride_K_head = K.stride(1),
+            stride_K_seq = K.stride(2),
+            stride_K_dim = K.stide(3),
+            stride_V_batch = V.stride(0),
+            stride_V_head = V.stride(1),
+            stride_V_seq = V.stride(2),
+            stride_V_dim = V.stide(3),
+            NUM_HEADS = NUM_HEADS,
+            SEQ_LEN = SEQ_LEN,
+            HEAD_DIM=HEAD_DIM_Q,
+            stage=stage,
+        )
+
+        
 
 
 def test_op(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal, dtype=torch.float16):

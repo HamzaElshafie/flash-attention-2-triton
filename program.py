@@ -7,7 +7,26 @@ class TritonAttention(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, Q, K, V, causal, softmax_scale): 
-        pass
+        HEAD_DIM_Q, HEAD_DIM_K, HEAD_DIM_V = Q.shape[-1], K.shape[-1], V.shape[-1]
+
+        BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
+
+        assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V  # Make sure head dimension matches for Q, K and V
+
+        O = torch.empty_like(Q) # (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM), not the Q, K and V of the input to the attention, but its the output
+                                # of the W_Q, W_V, W_K because flash attention is not concerned with optimising these matrices.
+
+        stage = 3 if causal else 1
+
+        grid = lambda args: (
+            triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"])
+            BATCH_SIZE * NUM_HEADS,
+            1,
+        )
+
+
+
+
 
 def test_op(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal, dtype=torch.float16):
     Q = (
@@ -33,13 +52,13 @@ def test_op(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal, dtype=torch.float1
 
     # Reference (Vanilla) implementation
     MASK = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device="cuda"))
-    P = torch.matmul(Q, K.transpose(2,3)) * scaling_factor
+    P = torch.matmul(Q, K.transpose(2,3)) * scaling_factor # --> # SEQ_LEN × SEQ_LEN attention pattern
     if causal:
         P[:, :, MASK == 0] = float("-inf")
     P = torch.softmax(P.float(), dim=-1).half() # Convert P first to fp32 for numerical stability and then convert back to half precision to maintain consistency with
                                                 # other tensors.
 
-    ref_0 = torch.matmul(P, V)
+    ref_0 = torch.matmul(P, V) # --> Brings back output shape to match input shape
     ref_0.backward(d0)
     ref_dV, V.grad = V.grad.clone(), None
     ref_dK, K.grad = K.grad.clone(), None

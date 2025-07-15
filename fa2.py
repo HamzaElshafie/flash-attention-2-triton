@@ -286,6 +286,16 @@ class TritonAttention(torch.autograd.Function):
         return O
 
 # Benchmarking 
+def torch_mha_attention(Q, K, V, softmax_scale, causal):
+    Q, K, V = Q.half(), K.half(), V.half()
+    return torch.nn.functional.scaled_dot_product_attention(
+        Q, K, V,
+        attn_mask=None,
+        dropout_p=0.0,
+        is_causal=causal,
+        scale=softmax_scale
+    )
+
 def torch_attention(Q, K, V, softmax_scale, causal):
     Q, K, V = Q.half(), K.half(), V.half()
     attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * softmax_scale
@@ -305,21 +315,28 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
     Q = torch.randn((batch_size, num_heads, seq_len, head_dim), device=DEVICE, dtype=dtype)
     K = torch.randn((batch_size, num_heads, seq_len, head_dim), device=DEVICE, dtype=dtype)
     V = torch.randn((batch_size, num_heads, seq_len, head_dim), device=DEVICE, dtype=dtype)
-    softmax_scale = 1.0 / math.sqrt(head_dim) # 1/sqrt(dk)
+    softmax_scale = 1.0 / math.sqrt(head_dim)
 
-    out_triton = lambda: triton_attention(Q, K, V, softmax_scale, causal)
-    out_torch = lambda: torch_attention(Q, K, V, softmax_scale, causal)
+    def out_triton(): return triton_attention(Q, K, V, softmax_scale, causal)
+    def out_torch(): return torch_attention(Q, K, V, softmax_scale, causal)
+    def out_mha(): return torch_mha_attention(Q, K, V, softmax_scale, causal)
 
-    # Check correctness
     if check_outputs and provider == 'triton':
-        torch_out = out_torch()
-        triton_out = out_triton()
-
         try:
-          triton.testing.assert_close(torch_out, triton_out, atol=2e-2, rtol=2e-3)
-          print(f"[seq_len={seq_len}] Output match: PASSED")
-        except AssertionError as e:
-          print(f"[seq_len={seq_len}] Output match: NOT PASSED")
+            torch_out = out_torch()
+            triton_out = out_triton()
+            triton.testing.assert_close(torch_out, triton_out, atol=2e-2, rtol=2e-3)
+            print(f"[seq_len={seq_len}] Triton output match: PASSED")
+        except AssertionError:
+            print(f"[seq_len={seq_len}] Triton output match: FAILED")
+    elif check_outputs and provider == 'mha':
+        try:
+            ref = out_torch()
+            mha_out = out_mha()
+            triton.testing.assert_close(ref, mha_out, atol=2e-2, rtol=2e-3)
+            print(f"[seq_len={seq_len}] Torch MHA output match: PASSED")
+        except AssertionError:
+            print(f"[seq_len={seq_len}] Torch MHA output match: FAILED")
 
     # Warm-up
     for _ in range(10):
@@ -327,14 +344,22 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
             out_torch()
         elif provider == 'triton':
             out_triton()
+        elif provider == 'mha':
+            out_mha()
     torch.cuda.synchronize()
 
-    # Timing
-    fn = out_torch if provider == 'torch' else out_triton
+    if provider == 'torch':
+        fn = out_torch
+    elif provider == 'triton':
+        fn = out_triton
+    elif provider == 'mha':
+        fn = out_mha
+    else:
+        raise ValueError(f"Unknown provider {provider}")
+
     runtimes_ms = triton.testing.do_bench(fn, quantiles=[0.5, 0.2, 0.8])
     median_runtime_s = runtimes_ms[0] / 1e3
 
-    # FLOPs calculation
     causal_scale = 0.5 if causal else 1.0
     flops_per_head = 2 * causal_scale * seq_len * seq_len * head_dim
     total_flops = flops_per_head * batch_size * num_heads
@@ -357,11 +382,21 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
     )
 )
 
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['seq_len'],
+        x_vals=[512, 1024, 2048, 4096, 8192],
+        line_arg='provider',
+        line_vals=['torch', 'mha', 'triton'],
+        line_names=['Naive Torch', 'Torch MHA', 'Triton'],
+        styles=[('green', '-'), ('red', '-'), ('blue', '-')],
+        ylabel='Throughput (TFLOPs/s)',
+        plot_name='flashattention-tflops',
+        args={'causal': True},
+    )
+)
 def benchmark_flashattention(seq_len, provider, causal):
     return run_benchmark(seq_len=seq_len, provider=provider, causal=causal)
-
-if __name__ == "__main__":
-    benchmark_flashattention.run(show_plots=True, print_data=True)
 
 # flashattention-tflops:
 #    seq_len  Naive Torch  nn.MultiheadAttention     Triton

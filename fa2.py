@@ -1,7 +1,8 @@
+import math
 import torch
 import triton
 import triton.language as tl
-import math
+import triton.testing
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(DEVICE)
@@ -69,10 +70,11 @@ def _attn_fwd_inner(
         # Load Vj block
         V_block = tl.load(V_block_ptr)
         
-        # P_block = P.block_to(tl.float16)
+        P = P.to(tl.float16)
+        V_block = V_block.to(tl.float16)
 
         O_block = O_block * correction_factor.expand_dims(1) # Fix previous block
-        O_block = tl.dot(P_block, V_block, O_block)
+        O_block = tl.dot(P, V_block, O_block)
 
         # Save new maximum
         m_i = m_ij
@@ -81,8 +83,23 @@ def _attn_fwd_inner(
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_SIZE_KV, 0))
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_SIZE_KV))
 
-    return O_block, l_i, m_i    
+    return O_block, l_i, m_i
 
+    
+@triton.autotune(
+    [
+        triton.Config(
+            {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+            num_stages=num_stages,
+            num_warps=num_warps,
+        )
+        for BLOCK_SIZE_Q in [64, 128]
+        for BLOCK_SIZE_KV in [32, 64]
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4]
+    ],
+    key=["SEQ_LEN", "HEAD_DIM"],
+)
 @triton.jit
 def _attn_fwd(
     Q,
@@ -113,8 +130,7 @@ def _attn_fwd(
     BLOCK_SIZE_Q: tl.constexpr, # Queries to group toegther
     BLOCK_SIZE_KV: tl.constexpr, # Keys/Values to group together
     STAGE: tl.constexpr,
-    ):
-    
+):
     tl.static_assert(BLOCK_SIZE_KV <= HEAD_DIM)
 
     block_index_q = tl.program_id(0)
@@ -135,31 +151,34 @@ def _attn_fwd(
         strides=(stride_Q_seq, stride_Q_dim),
         offsets=(block_index_q * BLOCK_SIZE_Q, 0),
         block_shape=(BLOCK_SIZE_Q, HEAD_DIM),
-        order=(1,0)
+        order=(1, 0),
     )
+
     K_block_ptr = tl.make_block_ptr(
-        base=K+qkv_offset, # K[index_batch, index_head, :, :]
-        shape=[SEQ_LEN, HEAD_DIM],
-        strides=(stride_K_dim, stride_K_seq), # --> Transposing
+        base=K + qkv_offset,
+        shape=(HEAD_DIM, SEQ_LEN),
+        strides=(stride_K_dim, stride_K_seq),
         offsets=(0, 0),
         block_shape=(HEAD_DIM, BLOCK_SIZE_KV),
-        order=(1,0)
+        order=(0, 1),
     )
+
     V_block_ptr = tl.make_block_ptr(
-        base=V+qkv_offset, # V[index_batch, index_head, :, :]
-        shape=[SEQ_LEN, HEAD_DIM],
+        base=V + qkv_offset,
+        shape=(SEQ_LEN, HEAD_DIM),
         strides=(stride_V_seq, stride_V_dim),
-        offsets=(block_index_q * BLOCK_SIZE_KV, 0),
+        offsets=(0, 0),
         block_shape=(BLOCK_SIZE_KV, HEAD_DIM),
-        order=(1,0)
+        order=(1, 0),
     )
+
     O_block_ptr = tl.make_block_ptr(
         base=O+qkv_offset, # O[index_batch, index_head, block_index_q * BLOCK_SIZE_Q, :]
         shape=[SEQ_LEN, HEAD_DIM],
         strides=(stride_O_seq, stride_O_dim),
         offsets=(block_index_q * BLOCK_SIZE_Q, 0),
         block_shape=(BLOCK_SIZE_Q, HEAD_DIM),
-        order=(1,0)
+        order=(1, 0),
     )
 
     offsets_q = block_index_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q) # Offsets for the global index of each token in the sequence
@@ -212,15 +231,12 @@ def _attn_fwd(
             SEQ_LEN,
         )
 
-        O_block = O_block / l_i.expand_dims(1)
-        tl.store(O_block_ptr, O_block.to(O.type.element_ty))
-        
+    O_block = O_block / l_i.expand_dims(1)
+    tl.store(O_block_ptr, O_block.to(O.type.element_ty))
 
 class TritonAttention(torch.autograd.Function):
-    pass
-
     @staticmethod
-    def forward(Q, K, V, causal, softmax_scale):
+    def forward(ctx, Q, K, V, causal, softmax_scale):
         HEAD_DIM_Q, HEAD_DIM_K, HEAD_DIM_V = Q.shape[-1], K.shape[-1], V.shape[-1]
 
         # Make sure head dimension matches for Q, K and V
@@ -238,28 +254,28 @@ class TritonAttention(torch.autograd.Function):
             1,
         )
 
-        _attn_fwd[grid] (
+        _attn_fwd[grid](
             Q=Q,
             K=K,
             V=V,
             O=O,
-            softmax_scale = softmax_scale,
-            stride_Q_batch = Q.stride(0),
-            stride_Q_head = Q.stride(1),
-            stride_Q_seq = Q.stride(2),
-            stride_Q_dim = Q.stride(3),
-            stride_K_batch = K.stride(0),
-            stride_K_head = K.stride(1),
-            stride_K_seq = K.stride(2),
-            stride_K_dim = K.stride(3),
-            stride_V_batch = V.stride(0),
-            stride_V_head = V.stride(1),
-            stride_V_seq = V.stride(2),
-            stride_V_dim = V.stride(3),
-            stride_O_batch = O.stride(0),
-            stride_O_head = O.stride(1),
-            stride_O_seq = O.stride(2),
-            stride_O_dim = O.stride(3),
+            softmax_scale=softmax_scale,
+            stride_Q_batch=Q.stride(0),
+            stride_Q_head=Q.stride(1),
+            stride_Q_seq=Q.stride(2),
+            stride_Q_dim=Q.stride(3),
+            stride_K_batch=K.stride(0),
+            stride_K_head=K.stride(1),
+            stride_K_seq=K.stride(2),
+            stride_K_dim=K.stride(3),
+            stride_V_batch=V.stride(0),
+            stride_V_head=V.stride(1),
+            stride_V_seq=V.stride(2),
+            stride_V_dim=V.stride(3),
+            stride_O_batch=O.stride(0),
+            stride_O_head=O.stride(1),
+            stride_O_seq=O.stride(2),
+            stride_O_dim=O.stride(3),
             BATCH_SIZE=BATCH_SIZE,
             NUM_HEADS=NUM_HEADS,
             SEQ_LEN=SEQ_LEN,
@@ -300,8 +316,17 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
 
         try:
           triton.testing.assert_close(torch_out, triton_out, atol=2e-2, rtol=2e-3)
+          print(f"[seq_len={seq_len}] Output match: PASSED")
         except AssertionError as e:
           print(f"[seq_len={seq_len}] Output match: NOT PASSED")
+
+    # Warm-up
+    for _ in range(10):
+        if provider == 'torch':
+            out_torch()
+        elif provider == 'triton':
+            out_triton()
+    torch.cuda.synchronize()
 
     # Timing
     fn = out_torch if provider == 'torch' else out_triton
@@ -319,8 +344,8 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
 # Plot TFLOPs vs SEQ_LEN
 @triton.testing.perf_report(
     triton.testing.Benchmark(
-        x_names=['SEQ_LEN'],
-        x_vals=[512, 1024, 2048, 4096],
+        x_names=['seq_len'],
+        x_vals=[512, 1024, 2048, 4096, 8192],
         line_arg='provider',
         line_vals=['torch', 'triton'],
         line_names=['PyTorch', 'Triton'],
@@ -332,7 +357,15 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
 )
 
 def benchmark_flashattention(seq_len, provider, causal):
-    return run_benchmark(seq_len, provider, causal)
+    return run_benchmark(seq_len=seq_len, provider=provider, causal=causal)
 
 if __name__ == "__main__":
     benchmark_flashattention.run(show_plots=True, print_data=True)
+
+#     flashattention-tflops:
+#    seq_len   PyTorch     Triton
+# 0    512.0  0.902389  13.443283
+# 1   1024.0  1.278361  23.301689
+# 2   2048.0  1.301467  32.640497
+# 3   4096.0  1.363890  40.524675
+# 4   8192.0  1.398480  44.724334

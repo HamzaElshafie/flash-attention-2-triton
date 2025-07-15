@@ -3,6 +3,8 @@ import torch
 import triton
 import triton.language as tl
 import triton.testing
+import torch.nn.functional as F
+
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(DEVICE)
@@ -373,20 +375,6 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
         x_names=['seq_len'],
         x_vals=[512, 1024, 2048, 4096, 8192],
         line_arg='provider',
-        line_vals=['torch', 'triton'],
-        line_names=['PyTorch', 'Triton'],
-        styles=[('green', '-'), ('blue', '-')],
-        ylabel='Throughput (TFLOPs/s)', 
-        plot_name='flashattention-tflops',
-        args={'causal': True},
-    )
-)
-
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=['seq_len'],
-        x_vals=[512, 1024, 2048, 4096, 8192],
-        line_arg='provider',
         line_vals=['torch', 'mha', 'triton'],
         line_names=['Naive Torch', 'Torch MHA', 'Triton'],
         styles=[('green', '-'), ('red', '-'), ('blue', '-')],
@@ -397,6 +385,9 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
 )
 def benchmark_flashattention(seq_len, provider, causal):
     return run_benchmark(seq_len=seq_len, provider=provider, causal=causal)
+
+if __name__ == "__main__":
+    benchmark_flashattention.run(show_plots=True, print_data=True)
 
 # flashattention-tflops:
 #    seq_len  Naive Torch  nn.MultiheadAttention     Triton

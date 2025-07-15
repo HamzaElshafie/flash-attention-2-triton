@@ -288,7 +288,7 @@ class TritonAttention(torch.autograd.Function):
         return O
 
 # Benchmarking 
-def torch_mha_attention(Q, K, V, softmax_scale, causal):
+def torch_sdpa_attention(Q, K, V, softmax_scale, causal):
     Q, K, V = Q.half(), K.half(), V.half()
     return torch.nn.functional.scaled_dot_product_attention(
         Q, K, V,
@@ -321,7 +321,7 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
 
     def out_triton(): return triton_attention(Q, K, V, softmax_scale, causal)
     def out_torch(): return torch_attention(Q, K, V, softmax_scale, causal)
-    def out_mha(): return torch_mha_attention(Q, K, V, softmax_scale, causal)
+    def out_sdpa(): return torch_mha_attention(Q, K, V, softmax_scale, causal)
 
     if check_outputs and provider == 'triton':
         try:
@@ -334,8 +334,8 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
     elif check_outputs and provider == 'mha':
         try:
             ref = out_torch()
-            mha_out = out_mha()
-            triton.testing.assert_close(ref, mha_out, atol=2e-2, rtol=2e-3)
+            out_sdpa = out_sdpa()
+            triton.testing.assert_close(ref, out_sdpa, atol=2e-2, rtol=2e-3)
             print(f"[seq_len={seq_len}] Torch MHA output match: PASSED")
         except AssertionError:
             print(f"[seq_len={seq_len}] Torch MHA output match: FAILED")
@@ -346,16 +346,16 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
             out_torch()
         elif provider == 'triton':
             out_triton()
-        elif provider == 'mha':
-            out_mha()
+        elif provider == 'torch sdpa':
+            out_sdpa()
     torch.cuda.synchronize()
 
     if provider == 'torch':
         fn = out_torch
     elif provider == 'triton':
         fn = out_triton
-    elif provider == 'mha':
-        fn = out_mha
+    elif provider == 'torch sdpa':
+        fn = out_sdpa
     else:
         raise ValueError(f"Unknown provider {provider}")
 
@@ -375,8 +375,8 @@ def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, cau
         x_names=['seq_len'],
         x_vals=[512, 1024, 2048, 4096, 8192],
         line_arg='provider',
-        line_vals=['torch', 'mha', 'triton'],
-        line_names=['Naive Torch', 'Torch MHA', 'Triton'],
+        line_vals=['torch', 'torch sdpa', 'triton'],
+        line_names=['Naive Torch', 'Torch SDPA', 'Triton'],
         styles=[('green', '-'), ('red', '-'), ('blue', '-')],
         ylabel='Throughput (TFLOPs/s)',
         plot_name='flashattention-tflops',

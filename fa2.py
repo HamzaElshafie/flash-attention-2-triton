@@ -287,6 +287,7 @@ class TritonAttention(torch.autograd.Function):
 
 # Benchmarking 
 def torch_attention(Q, K, V, softmax_scale, causal):
+    Q, K, V = Q.half(), K.half(), V.half()
     attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * softmax_scale
     if causal:
         S = Q.size(-2) # (SEQ_LEN, SEQ_LEN)
@@ -299,7 +300,7 @@ def triton_attention(Q, K, V, softmax_scale, causal):
     return TritonAttention.apply(Q, K, V, causal, softmax_scale)
 
 def run_benchmark(seq_len, provider, batch_size=4, num_heads=8, head_dim=64, causal=True, check_outputs=True):
-    dtype = torch.float32
+    dtype = torch.float16
 
     Q = torch.randn((batch_size, num_heads, seq_len, head_dim), device=DEVICE, dtype=dtype)
     K = torch.randn((batch_size, num_heads, seq_len, head_dim), device=DEVICE, dtype=dtype)
@@ -362,10 +363,10 @@ def benchmark_flashattention(seq_len, provider, causal):
 if __name__ == "__main__":
     benchmark_flashattention.run(show_plots=True, print_data=True)
 
-#     flashattention-tflops:
-#    seq_len   PyTorch     Triton
-# 0    512.0  0.902389  13.443283
-# 1   1024.0  1.278361  23.301689
-# 2   2048.0  1.301467  32.640497
-# 3   4096.0  1.363890  40.524675
-# 4   8192.0  1.398480  44.724334
+# flashattention-tflops:
+#    seq_len  Naive Torch  nn.MultiheadAttention     Triton
+# 0    512.0     1.765280              15.887515  20.164923
+# 1   1024.0     1.972862              34.952534  36.157792
+# 2   2048.0     1.907369              55.553695  52.428801
+# 3   4096.0     2.083673              73.103337  67.923954
+# 4   8192.0     2.142171              79.231245  61.091366
